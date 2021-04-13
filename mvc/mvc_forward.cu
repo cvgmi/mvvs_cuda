@@ -109,7 +109,7 @@ __device__ void mvcExp(
 template <typename scalar_t>
 __global__ void mvc_cuda_forward_kernel(
             torch::PackedTensorAccessor<scalar_t, 6, torch::RestrictPtrTraits, size_t> X,
-            torch::PackedTensorAccessor<scalar_t, 5, torch::RestrictPtrTraits, size_t> weights,
+            __const__ torch::PackedTensorAccessor<scalar_t, 5, torch::RestrictPtrTraits, size_t> restrict weights, 
             torch::PackedTensorAccessor<scalar_t, 6, torch::RestrictPtrTraits, size_t> output,
             dim3 block_grid_dims){
     
