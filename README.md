@@ -1,4 +1,4 @@
-# MVC_CUDA: A CUDA implementation of the MVC and MVVS layers.
+# MVVS_CUDA: A CUDA implementation of the MVC and MVVS layers.
 
 ## Insallation instructions:
 This package is built as a PyTorch CUDA extension, and thus requires a non-root installation of Python and PyTorch to
