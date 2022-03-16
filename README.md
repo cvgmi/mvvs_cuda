@@ -8,4 +8,3 @@ install. These instructions accomplish this using a anaconda enviorment.
 3. Load CUDA and gcc `module load cuda/11` and `module load gcc/9.3`
 3. Install PyTorch: `conda install pytorch torchvision torchaudio cudatoolkit=10.2 -c pytorch`
 4. Install extension: `python setup.py install`
-5. Run benchmark `python benchmark.py`
