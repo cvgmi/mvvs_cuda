@@ -41,13 +41,8 @@ STATIC_LIB := $(OBJ_DIR)/libmake_pytorch.a
 # CUDA architecture setting: going with all of them.
 # For CUDA < 6.0, comment the *_50 through *_61 lines for compatibility.
 # For CUDA < 8.0, comment the *_60 and *_61 lines for compatibility.
-CUDA_ARCH := -gencode arch=compute_30,code=sm_30 \
-		-gencode arch=compute_35,code=sm_35 \
-		-gencode arch=compute_50,code=sm_50 \
-		-gencode arch=compute_52,code=sm_52 \
-		-gencode arch=compute_60,code=sm_60 \
-		-gencode arch=compute_61,code=sm_61 \
-		-gencode arch=compute_61,code=compute_61
+CUDA_ARCH := -gencode arch=compute_80,code=sm_80 \
+		-gencode arch=compute_86,code=compute_86
 
 # We will also explicitly add stdc++ to the link target.
 LIBRARIES += stdc++ cudart c10 caffe2 torch torch_python caffe2_gpu
@@ -58,7 +53,7 @@ ifeq ($(DEBUG), 1)
 	# https://gcoe-dresden.de/reaching-the-shore-with-a-fog-warning-my-eurohack-day-4-morning-session/
 	NVCCFLAGS += -g -G # -rdc true
 else
-	COMMON_FLAGS += -DNDEBUG -O3
+	COMMON_FLAGS += -DNDEBUG -O4
 endif
 
 WARNINGS := -Wall -Wno-sign-compare -Wcomment

@@ -2,20 +2,21 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cuda_profiler_api.h>
 
 #include <math.h>
 
 #include <vector>
-#include <iostream>
 
 // size of the edge of a block 
 #define BLOCK_SIZE 6
+#define BLOCK_SIZE_TILED 4
 // number of samples per voxel. TODO: Consider how to make this dynamic
 #define PER_VOXEL 45
 // epsilon
-#define EPS 0.000000001
+#define EPS 1e-6
 
-__device__ dim3 offset2coordinates_RM(size_t offset, 
+__device__ dim3 offset2coordinates_RM_log(size_t offset, 
                                       size_t height,
                                       size_t width,
                                       size_t depth){
@@ -30,9 +31,9 @@ __device__ dim3 offset2coordinates_RM(size_t offset,
     return output;
 }
 
-template <typename scalar_t>
-__device__ void mvcLog(
-        torch::PackedTensorAccessor<scalar_t, 6, torch::RestrictPtrTraits, size_t> X,
+template <typename scalar_t, typename accessor>
+__host__ __device__ void mvcLog(
+        accessor X,
         scalar_t* output,
         int batch, 
         int c, int mid_c,
@@ -42,12 +43,12 @@ __device__ void mvcLog(
     // SOURCE: https://projects.csail.mit.edu/atemuri/wiki/images/f/fe/SrivastavaJermynJoshiCVPR2007.pdf eq. 9
     // compute inner product between X[x, y, z] and X[x_m, y_m, z_m]
     scalar_t inner = 0;
-    for(int n = 0; n < X.size(5); n++)
+    for(int n = 0; n < PER_VOXEL; n++)
         inner += (X[batch][c][x][y][z][n])*(X[batch][mid_c][x_m][y_m][z_m][n]);
     
 
     // compute vector u 
-    for(int n = 0; n < X.size(5); n++){
+    for(int n = 0; n < PER_VOXEL; n++){
         scalar_t X_n = X[batch][c][x][y][z][n];
         scalar_t X_m_n = X[batch][mid_c][x_m][y_m][z_m][n];
 
@@ -57,7 +58,7 @@ __device__ void mvcLog(
     
     // compute the norm of the vector u
     scalar_t u_norm = 0;
-    for(int n = 0; n < X.size(5); n++)
+    for(int n = 0; n < PER_VOXEL; n++)
         u_norm += output[n]*output[n];
     
 
@@ -69,7 +70,7 @@ __device__ void mvcLog(
 
     // write output
     u_norm = sqrt(u_norm);
-    for(int n = 0; n < X.size(5); n++){
+    for(int n = 0; n < PER_VOXEL; n++){
         if (abs(u_norm) > EPS)
             output[n] = output[n]*acos(inner)/u_norm;
         else{
@@ -79,45 +80,16 @@ __device__ void mvcLog(
 }
 
 template <typename scalar_t>
-__device__ void mvcExp(
-        torch::PackedTensorAccessor<scalar_t, 6, torch::RestrictPtrTraits, size_t> X,
-        torch::PackedTensorAccessor<scalar_t, 6, torch::RestrictPtrTraits, size_t> output,
-        int batch, 
-        int c, int c_mid,
-        int x_m, int y_m, int z_m,
-        int hkf){
-    
-    // SOURCE: https://projects.csail.mit.edu/atemuri/wiki/images/f/fe/SrivastavaJermynJoshiCVPR2007.pdf eq. 9
-    // compute norm of output log vector
-    scalar_t norm = 0;
-    for(int n = 0; n < X.size(5); n++)
-        norm += output[batch][c][x_m-hkf][y_m-hkf][z_m-hkf][n]*output[batch][c][x_m-hkf][y_m-hkf][z_m-hkf][n];
-
-    norm = sqrt(norm);
-    if(norm == 0)
-        norm = 1;
-    
-    // take weighted combination 
-    scalar_t cos_norm = cos(norm);
-    scalar_t sin_norm = sin(norm)/norm;
-    for(int n = 0; n < X.size(5); n++){
-        output[batch][c][x_m-hkf][y_m-hkf][z_m-hkf][n] = cos_norm*X[batch][c_mid][x_m][y_m][z_m][n] +
-                                                        sin_norm*output[batch][c][x_m-hkf][y_m-hkf][z_m-hkf][n];
-    }
-}
-
-template <typename scalar_t>
-__global__ void mvc_cuda_forward_kernel(
+__global__ void mvc_cuda_log_forward_kernel(
             torch::PackedTensorAccessor<scalar_t, 6, torch::RestrictPtrTraits, size_t> X,
-            __const__ torch::PackedTensorAccessor<scalar_t, 5, torch::RestrictPtrTraits, size_t> restrict weights, 
+            const torch::PackedTensorAccessor<scalar_t, 5, torch::RestrictPtrTraits, size_t> __restrict__ weights,
             torch::PackedTensorAccessor<scalar_t, 6, torch::RestrictPtrTraits, size_t> output,
             dim3 block_grid_dims){
-    
     // compute block coordinates from linearized blockIdx.x
     size_t batch = blockIdx.x;
     size_t block_offset = blockIdx.y;
 
-    const dim3 blockCoord = offset2coordinates_RM(block_offset, block_grid_dims.x, block_grid_dims.y, block_grid_dims.z);
+    const dim3 blockCoord = offset2coordinates_RM_log(block_offset, block_grid_dims.x, block_grid_dims.y, block_grid_dims.z);
 
     const int kernel_size = weights.size(1);
 
@@ -158,15 +130,17 @@ __global__ void mvc_cuda_forward_kernel(
                         // output
 
                         // TODO: we do not need to compute this when x_o,y_o,z_o = x,y,z
-                        mvcLog(X, mvc_out,
-                               batch, c, mid_channel,
-                               x_o, y_o, z_o,
-                               x, y, z);
 
                         // write out weighted Log to output array
                         for(int c_out = 0; c_out < weights.size(0); c_out++){
+                            mvcLog(X, mvc_out,
+                                batch, c, c_out % X.size(1),
+                                x_o, y_o, z_o,
+                                x, y, z);
+
+                            scalar_t weight = weights[c_out][i+half_kernel-1][j+half_kernel-1][k+half_kernel-1][c];
+
                             for(int n = 0; n < X.size(5); n++){
-                                scalar_t weight = weights[c_out][i+half_kernel-1][j+half_kernel-1][k+half_kernel-1][c];
                                 output[batch][c_out][x-half_kernel_floor][y-half_kernel_floor][z-half_kernel_floor][n] += mvc_out[n]*weight;
                             }
                         }
@@ -175,17 +149,9 @@ __global__ void mvc_cuda_forward_kernel(
             }
         }
     }
-    
-    // do exponential of output
-    for(int c_out = 0; c_out < weights.size(0); c_out++){
-        mvcExp(X, output,
-                batch, c_out, mid_channel,
-                x, y, z,
-                half_kernel_floor);
-    }
 }
 
-torch::Tensor mvc_cuda_forward(torch::Tensor x,
+torch::Tensor mvc_cuda_log_forward(torch::Tensor x,
                                torch::Tensor weights){
     // MVC Forward Pass:
     // x: [batches, channels_in, H, W, D, N]
@@ -199,6 +165,7 @@ torch::Tensor mvc_cuda_forward(torch::Tensor x,
     torch::Tensor output = torch::zeros({x.size(0), weights.size(0), H_out, W_out, D_out, x.size(5)},
                                         torch::dtype(x.dtype()).device(torch::kCUDA));
     
+    // call kernels using ATEN dispatch macro
     // CUDA execution configuration:
     // block grid size (with ceiling division)
     int block_grid_h = (H_out+BLOCK_SIZE-1)/BLOCK_SIZE;
@@ -206,27 +173,18 @@ torch::Tensor mvc_cuda_forward(torch::Tensor x,
     int block_grid_d = (D_out+BLOCK_SIZE-1)/BLOCK_SIZE;
     const dim3 block_grid_dims(block_grid_h, block_grid_w, block_grid_d);
     int block_grid = block_grid_h*block_grid_w*block_grid_d;
-    std::cout << block_grid << std::endl;
-    std::cout << BLOCK_SIZE << std::endl;
     // blocks: [batches, output_size/block_size]
     const dim3 blocks(x.size(0), block_grid);
     // threads: block_size
     const dim3 threads(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
-    
-    // call kerenl using Aten dispatch macro
-    AT_DISPATCH_FLOATING_TYPES(x.type(), "mvc_cuda_forward_kernel", ([&] {
-                mvc_cuda_forward_kernel<scalar_t><<<blocks, threads>>>(
+
+    AT_DISPATCH_FLOATING_TYPES(x.type(), "mvc_cuda_log_forward_kernel", ([&] {
+                mvc_cuda_log_forward_kernel<scalar_t><<<blocks, threads>>>(
                     x.packed_accessor<scalar_t, 6, torch::RestrictPtrTraits, size_t>(),
                     weights.packed_accessor<scalar_t, 5, torch::RestrictPtrTraits, size_t>(),
                     output.packed_accessor<scalar_t, 6, torch::RestrictPtrTraits, size_t>(),
                     block_grid_dims);
-        }));
+    }));
 
     return output;
-}
-
-
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t sigmoid(scalar_t z) {
-      return 1.0 / (1.0 + exp(-z));
 }
